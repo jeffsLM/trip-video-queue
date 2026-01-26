@@ -1,5 +1,8 @@
 import { MessagesUpsert } from '../types';
 import { createLogger } from '../utils/logger.utils';
+import { saveVideoSuggestion, markAsPublished } from '../services/mongodb.service';
+import { publishVideoSuggestion } from '../services/rabbitMQ.service';
+import { getSystemStatus } from '../commands/status.command';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -35,6 +38,43 @@ function isDuplicateMessage(messageId: string): boolean {
   return false;
 }
 
+/**
+ * Extrai URL de vídeo da mensagem
+ * Suporta: YouTube Shorts, TikTok, Instagram Reels, YouTube normal
+ */
+function extractVideoUrl(text: string): string | null {
+  // Padrões de URL para cada plataforma
+  const patterns = [
+    // YouTube Shorts
+    /https?:\/\/(www\.)?(youtube\.com\/shorts\/[a-zA-Z0-9_-]+|youtu\.be\/[a-zA-Z0-9_-]+)/i,
+    // YouTube normal
+    /https?:\/\/(www\.)?(youtube\.com\/watch\?v=[a-zA-Z0-9_-]+|youtu\.be\/[a-zA-Z0-9_-]+)/i,
+    // TikTok
+    /https?:\/\/(www\.)?(tiktok\.com\/@[a-zA-Z0-9._]+\/video\/[0-9]+|vm\.tiktok\.com\/[a-zA-Z0-9]+)/i,
+    // Instagram Reels
+    /https?:\/\/(www\.)?instagram\.com\/(reel|p)\/[a-zA-Z0-9_-]+/i,
+    // Facebook Watch
+    /https?:\/\/(www\.)?(facebook\.com\/watch\/?\?v=[0-9]+|fb\.watch\/[a-zA-Z0-9_-]+)/i,
+    // Twitter/X Video
+    /https?:\/\/(www\.)?(twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/[0-9]+/i,
+    // Qualquer outra URL como fallback
+    /https?:\/\/[^\s]+/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      // Limpar possíveis caracteres extras no final
+      let url = match[0];
+      // Remover pontuação comum no final
+      url = url.replace(/[.,!?;]$/, '');
+      return url;
+    }
+  }
+
+  return null;
+}
+
 export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): Promise<void> {
   try {
     logger.info(`🔥 handleMessagesUpsert chamado com ${messages.length} mensagem(ns)`);
@@ -56,42 +96,108 @@ export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): 
       }
 
       // Verificar se é do grupo autorizado
-      if (isAllowedGroup(remoteJid)) {
-        logger.info(`✅ Mensagem do grupo autorizado`);
-
-        // TODO: Adicionar handlers específicos para diferentes tipos de mensagem
-        // Exemplos de tipos de mensagem disponíveis:
-        // - msg.message.imageMessage - Imagens
-        // - msg.message.videoMessage - Vídeos
-        // - msg.message.conversation - Texto simples
-        // - msg.message.extendedTextMessage - Texto com formatação/contexto
-        // - msg.message.documentMessage - Documentos
-
-        if (msg.message.videoMessage) {
-          logger.info(`🎥 Vídeo recebido - processamento futuro`);
-          // TODO: Implementar handler de vídeo
-          continue;
-        }
-
-        if (msg.message.conversation || msg.message.extendedTextMessage) {
-          const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-          logger.info(`💬 Texto recebido: ${text.substring(0, 50)}`);
-          // TODO: Implementar handler de comandos de texto
-          continue;
-        }
-
-        if (msg.message.imageMessage) {
-          logger.info(`🖼️ Imagem recebida - processamento futuro`);
-          // TODO: Implementar handler de imagem se necessário
-          continue;
-        }
-
-        logger.info(`⚠️ Tipo de mensagem não suportado ainda`);
+      if (!isAllowedGroup(remoteJid)) {
+        logger.info(`🚫 Grupo não autorizado - ignorando: ${remoteJid}`);
         continue;
       }
 
-      // Grupo não autorizado
-      logger.info(`🚫 Grupo não autorizado - ignorando: ${remoteJid}`);
+      logger.info(`✅ Mensagem do grupo autorizado`);
+
+      // Processar apenas mensagens de texto (conversation ou extendedTextMessage)
+      if (msg.message.conversation || msg.message.extendedTextMessage) {
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+        const pushName = msg.pushName || 'Desconhecido';
+        
+        logger.info(`💬 Texto recebido: ${text.substring(0, 100)}`);
+
+        // Verificar se é comando de status
+        const textLower = text.toLowerCase().trim();
+        if (textLower === 'status' || textLower === '/status') {
+          logger.info('📊 Comando de status detectado');
+          
+          try {
+            const statusMessage = await getSystemStatus();
+            await sock.sendMessage(remoteJid!, { text: statusMessage });
+            logger.success('✅ Status enviado via WhatsApp');
+          } catch (error) {
+            logger.error('Erro ao enviar status:', error);
+            await sock.sendMessage(remoteJid!, { 
+              text: 'Erro ao obter status do sistema. Verifique os logs para mais detalhes.' 
+            });
+          }
+          continue;
+        }
+
+        // Extrair URL da mensagem
+        const url = extractVideoUrl(text);
+        
+        if (!url) {
+          logger.info('Mensagem sem URL - ignorando');
+          continue;
+        }
+
+        logger.info(`🔗 URL extraída: ${url}`);
+
+        try {
+          // PASSO 1: Salvar no MongoDB (fonte da verdade - confiabilidade garantida)
+          const videoData = {
+            url: url,
+            texto: text,
+            sugeridoPor: pushName,
+            messageId: msg.key.id || '',
+            chatId: remoteJid || '',
+            timestamp: Date.now(),
+            status: 'pending' as const
+          };
+
+          const savedDoc = await saveVideoSuggestion(videoData);
+          logger.success(`✅ Salvo no MongoDB: ${savedDoc._id}`);
+
+          // PASSO 2: Publicar na fila video-suggestions (event-driven)
+          await publishVideoSuggestion({
+            url: savedDoc.url,
+            texto: savedDoc.texto,
+            sugeridoPor: savedDoc.sugeridoPor
+          });
+          logger.success(`✅ Publicado na fila video-suggestions`);
+
+          // PASSO 3: Marcar como publicado no MongoDB
+          await markAsPublished(savedDoc.messageId);
+
+          // PASSO 4: Reagir com ✅ - sucesso
+          await sock.sendMessage(remoteJid!, { 
+            react: { text: '✅', key: msg.key } 
+          });
+          logger.success(`✅ Reação enviada com sucesso`);
+
+        } catch (error) {
+          logger.error('❌ Erro ao processar mensagem:', error);
+          
+          // Reagir com ❌ - falha
+          try {
+            await sock.sendMessage(remoteJid!, { 
+              react: { text: '❌', key: msg.key } 
+            });
+          } catch (reactError) {
+            logger.error('Erro ao reagir com ❌:', reactError);
+          }
+        }
+
+        continue;
+      }
+
+      // Outros tipos de mensagem (vídeo, imagem, etc)
+      if (msg.message.videoMessage) {
+        logger.info(`🎥 Vídeo recebido - processamento futuro`);
+        continue;
+      }
+
+      if (msg.message.imageMessage) {
+        logger.info(`🖼️ Imagem recebida - processamento futuro`);
+        continue;
+      }
+
+      logger.info(`⚠️ Tipo de mensagem não suportado ainda`);
     }
   } catch (error) {
     logger.error('❌ ERRO CRÍTICO em handleMessagesUpsert:', error);

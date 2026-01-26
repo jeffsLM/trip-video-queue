@@ -6,8 +6,7 @@ const RABBITMQ_CONFIG = {
   reconnectDelay: parseInt(process.env.RABBITMQ_RECONNECT_DELAY || '5000'),
   maxRetries: parseInt(process.env.RABBITMQ_MAX_RETRIES || '5'),
   queues: {
-    TO_WHATSAPP: process.env.TO_WHATSAPP_QUEUE || 'to-whatsapp',
-    FROM_WHATSAPP: process.env.FROM_WHATSAPP_QUEUE || 'from-whatsapp'
+    VIDEO_SUGGESTIONS: 'video-suggestions' // Fila para event-driven de vídeos
   }
 } as const;
 
