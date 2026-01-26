@@ -2,8 +2,7 @@ module.exports = {
   apps: [
     {
       name: "trip-video-queue",
-      script: "dist/index.js",
-      cwd: "c:/source/trip-video-queue",
+      script: "./dist/index.js",
       instances: 1,
       autorestart: true,
       watch: false,
@@ -12,6 +11,9 @@ module.exports = {
         NODE_ENV: "production",
       },
       log_date_format: "YYYY-MM-DD HH:mm:ss",
+      error_file: "logs/error.log",
+      out_file: "logs/out.log",
+      merge_logs: true,
     }
   ],
 };
