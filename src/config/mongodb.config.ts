@@ -12,13 +12,11 @@ export const MONGODB_CONFIG = {
     connectTimeoutMS: 30000, // 30 segundos
     retryWrites: true,
     retryReads: true,
-    // Configurações TLS/SSL para resolver erro de certificate
+    // Configurações TLS/SSL para MongoDB Atlas
     tls: true,
     tlsAllowInvalidCertificates: false,
     tlsAllowInvalidHostnames: false,
-    // Força TLS 1.2 ou superior
-    tlsInsecure: false,
-    // Aumenta tamanho do pool para melhor performance
+    // Pool e timeout settings
     maxIdleTimeMS: 60000,
     waitQueueTimeoutMS: 30000,
   }
