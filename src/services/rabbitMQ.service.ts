@@ -75,21 +75,57 @@ async function getLazyConnection(): Promise<RabbitMQConnection> {
     logger.success('Conectado ao RabbitMQ via Lazy Loading');
     return cachedConnection;
 
-  } catch (error) {
+  } catch (error: any) {
     isConnecting = false;
     connectionRetries++;
+    
+    const errorMsg = getRabbitMQErrorMessage(error);
 
     if (connectionRetries >= RABBITMQ_CONFIG.maxRetries) {
-      logger.error(`Falha ao conectar após ${RABBITMQ_CONFIG.maxRetries} tentativas:`, error);
+      logger.error(`❌ Falha ao conectar após ${RABBITMQ_CONFIG.maxRetries} tentativas: ${errorMsg}`);
       connectionRetries = 0;
-      throw error;
+      
+      // Lança erro com mensagem amigável
+      const friendlyError = new Error(errorMsg);
+      friendlyError.name = 'RabbitMQConnectionError';
+      throw friendlyError;
     }
 
-    logger.warn(`Tentativa ${connectionRetries} falhou, tentando novamente em ${RABBITMQ_CONFIG.reconnectDelay}ms...`);
+    logger.warn(`⚠️ Tentativa ${connectionRetries} falhou: ${errorMsg}`);
+    logger.info(`⏳ Tentando novamente em ${RABBITMQ_CONFIG.reconnectDelay}ms...`);
     await new Promise(resolve => setTimeout(resolve, RABBITMQ_CONFIG.reconnectDelay));
 
     return getLazyConnection();
   }
+}
+
+/**
+ * Identifica o tipo de erro do RabbitMQ e retorna mensagem amigável
+ */
+function getRabbitMQErrorMessage(error: any): string {
+  const errorString = error.toString();
+  
+  // Erro de conexão
+  if (errorString.includes('ECONNREFUSED')) {
+    return '🔴 [RABBITMQ] Servidor RabbitMQ não está acessível. Verifique se o serviço está rodando';
+  }
+  
+  // Erro de autenticação
+  if (errorString.includes('ACCESS_REFUSED') || errorString.includes('403')) {
+    return '🔴 [RABBITMQ] Erro de autenticação. Verifique usuário e senha no .env';
+  }
+  
+  // Erro de timeout
+  if (errorString.includes('ETIMEDOUT')) {
+    return '🔴 [RABBITMQ] Timeout ao conectar com RabbitMQ. Verifique conexão de rede';
+  }
+  
+  // Erro de canal/fila
+  if (errorString.includes('Channel') || errorString.includes('Queue')) {
+    return '🔴 [RABBITMQ] Erro no canal ou fila. O canal pode ter sido fechado';
+  }
+  
+  return `🔴 [RABBITMQ] Erro desconhecido: ${errorString.substring(0, 200)}`;
 }
 
 /**
@@ -112,14 +148,19 @@ export async function publishVideoSuggestion(payload: {
     );
 
     if (!success) {
-      throw new Error('Falha ao enviar para fila video-suggestions');
+      throw new Error('🔴 [RABBITMQ] Fila cheia ou canal bloqueado - falha ao enviar mensagem');
     }
 
     logger.info(`📤 Vídeo publicado na fila video-suggestions: ${payload.url.substring(0, 50)}...`);
 
-  } catch (error) {
-    logger.error('Erro ao publicar na fila video-suggestions:', error);
-    throw error;
+  } catch (error: any) {
+    const errorMsg = getRabbitMQErrorMessage(error);
+    logger.error(errorMsg);
+    
+    // Lança erro com mensagem amigável
+    const friendlyError = new Error(errorMsg);
+    friendlyError.name = 'RabbitMQError';
+    throw friendlyError;
   }
 }
 

@@ -3,11 +3,15 @@ import { createLogger } from '../utils/logger.utils';
 import { saveVideoSuggestion, markAsPublished } from '../services/mongodb.service';
 import { publishVideoSuggestion } from '../services/rabbitMQ.service';
 import { getSystemStatus } from '../commands/status.command';
+import { sendErrorNotification } from '../utils/error-notification.utils';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const logger = createLogger('MessageHandler');
+
+// JID para notificações de erro (pode ser diferente do grupo de sugestões)
+const ERROR_NOTIFICATION_JID = process.env.ERROR_NOTIFICATION_JID || process.env.TARGET_GROUP_ID;
 
 const TARGET_GROUP_ID = process.env.TARGET_GROUP_ID;
 
@@ -150,28 +154,85 @@ export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): 
             status: 'pending' as const
           };
 
-          const savedDoc = await saveVideoSuggestion(videoData);
-          logger.success(`✅ Salvo no MongoDB: ${savedDoc._id}`);
+          let savedDoc;
+          try {
+            savedDoc = await saveVideoSuggestion(videoData);
+            logger.success(`✅ Salvo no MongoDB: ${savedDoc._id}`);
+          } catch (mongoError: any) {
+            // Erro específico do MongoDB
+            const errorMsg = mongoError.message || mongoError.toString();
+            logger.error(`🔴 [WHATSAPP → MONGODB] Falha ao salvar vídeo no banco de dados: ${errorMsg}`);
+            
+            // Reagir com ❌
+            try {
+              await sock.sendMessage(remoteJid!, { 
+                react: { text: '❌', key: msg.key } 
+              });
+            } catch (reactError) {
+              logger.error('🔴 [WHATSAPP] Erro ao reagir com ❌:', reactError);
+            }
+            
+            // Enviar notificação de erro no WhatsApp
+            if (ERROR_NOTIFICATION_JID) {
+              await sendErrorNotification(sock, ERROR_NOTIFICATION_JID, {
+                type: 'MONGODB',
+                operation: 'salvar vídeo sugerido',
+                message: errorMsg
+              });
+            }
+            
+            // Não continua o fluxo se falhou no MongoDB
+            continue;
+          }
 
           // PASSO 2: Publicar na fila video-suggestions (event-driven)
-          await publishVideoSuggestion({
-            url: savedDoc.url,
-            texto: savedDoc.texto,
-            sugeridoPor: savedDoc.sugeridoPor
-          });
-          logger.success(`✅ Publicado na fila video-suggestions`);
+          try {
+            await publishVideoSuggestion({
+              url: savedDoc.url,
+              texto: savedDoc.texto,
+              sugeridoPor: savedDoc.sugeridoPor
+            });
+            logger.success(`✅ Publicado na fila video-suggestions`);
+          } catch (rabbitError: any) {
+            // Erro específico do RabbitMQ
+            const errorMsg = rabbitError.message || rabbitError.toString();
+            logger.error(`🔴 [WHATSAPP → RABBITMQ] Falha ao publicar na fila: ${errorMsg}`);
+            
+            // Enviar notificação de erro no WhatsApp
+            if (ERROR_NOTIFICATION_JID) {
+              await sendErrorNotification(sock, ERROR_NOTIFICATION_JID, {
+                type: 'RABBITMQ',
+                operation: 'publicar vídeo na fila',
+                message: errorMsg
+              });
+            }
+            
+            // Continua mesmo com erro no RabbitMQ (já está salvo no MongoDB)
+            // O replay pode pegar depois
+          }
 
           // PASSO 3: Marcar como publicado no MongoDB
-          await markAsPublished(savedDoc.messageId);
+          try {
+            await markAsPublished(savedDoc.messageId);
+          } catch (markError: any) {
+            // Não crítico, apenas loga
+            logger.warn(`⚠️ [MONGODB] Falha ao marcar como publicado: ${markError.message}`);
+          }
 
           // PASSO 4: Reagir com ✅ - sucesso
-          await sock.sendMessage(remoteJid!, { 
-            react: { text: '✅', key: msg.key } 
-          });
-          logger.success(`✅ Reação enviada com sucesso`);
+          try {
+            await sock.sendMessage(remoteJid!, { 
+              react: { text: '✅', key: msg.key } 
+            });
+            logger.success(`✅ [WHATSAPP] Reação enviada com sucesso`);
+          } catch (reactError: any) {
+            logger.error(`🔴 [WHATSAPP] Erro ao reagir com ✅: ${reactError.message}`);
+          }
 
-        } catch (error) {
-          logger.error('❌ Erro ao processar mensagem:', error);
+        } catch (error: any) {
+          // Erro genérico não capturado (não deveria chegar aqui)
+          const errorMsg = error.message || error.toString();
+          logger.error(`🔴 [WHATSAPP] Erro crítico ao processar mensagem: ${errorMsg}`);
           
           // Reagir com ❌ - falha
           try {
@@ -179,7 +240,7 @@ export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): 
               react: { text: '❌', key: msg.key } 
             });
           } catch (reactError) {
-            logger.error('Erro ao reagir com ❌:', reactError);
+            logger.error('🔴 [WHATSAPP] Erro ao reagir com ❌:', reactError);
           }
         }
 

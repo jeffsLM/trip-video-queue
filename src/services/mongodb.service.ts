@@ -1,4 +1,4 @@
-import { MongoClient, Db, ObjectId } from 'mongodb';
+import { MongoClient, Db, ObjectId, MongoServerError } from 'mongodb';
 import { MONGODB_CONFIG } from '../config/mongodb.config';
 import { createLogger } from '../utils/logger.utils';
 
@@ -6,6 +6,7 @@ const logger = createLogger('MongoDB');
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
+let isConnecting = false;
 
 export interface VideoSuggestion {
   url: string;
@@ -22,27 +23,112 @@ export interface VideoSuggestion {
   _id?: ObjectId;
 }
 
-export async function connectMongo(): Promise<Db> {
-  if (db) return db;
-
-  try {
-    logger.info('Conectando ao MongoDB...');
-    client = new MongoClient(MONGODB_CONFIG.uri, MONGODB_CONFIG.options);
-    await client.connect();
-    db = client.db(MONGODB_CONFIG.database);
-
-    // Criar índice único em messageId para prevenir duplicatas
-    await db.collection('video_suggestions').createIndex(
-      { messageId: 1 },
-      { unique: true }
-    );
-
-    logger.success(`Conectado ao MongoDB: ${MONGODB_CONFIG.database}`);
-    return db;
-  } catch (error) {
-    logger.error('Erro ao conectar ao MongoDB:', error);
-    throw error;
+/**
+ * Identifica o tipo de erro do MongoDB e retorna mensagem amigável
+ */
+function getMongoErrorMessage(error: any): string {
+  const errorString = error.toString();
+  
+  // Erro de SSL/TLS
+  if (errorString.includes('SSL') || errorString.includes('TLS') || errorString.includes('tlsv1')) {
+    return '🔴 [MONGODB] Erro de certificado SSL/TLS ao conectar com MongoDB Atlas. Verifique: 1) Conexão com internet, 2) IP autorizado no Atlas, 3) Certificados do sistema';
   }
+  
+  // Erro de autenticação
+  if (errorString.includes('Authentication') || errorString.includes('auth')) {
+    return '🔴 [MONGODB] Erro de autenticação. Verifique usuário e senha no .env';
+  }
+  
+  // Erro de rede/timeout
+  if (errorString.includes('ENOTFOUND') || errorString.includes('ETIMEDOUT') || errorString.includes('ECONNREFUSED')) {
+    return '🔴 [MONGODB] Erro de rede ao conectar com MongoDB. Verifique conexão com internet';
+  }
+  
+  // Erro de Server Selection (nenhum servidor disponível)
+  if (errorString.includes('MongoServerSelectionError')) {
+    return '🔴 [MONGODB] Nenhum servidor MongoDB disponível. Verifique: 1) String de conexão, 2) IP autorizado no Atlas, 3) Cluster ativo';
+  }
+  
+  return `🔴 [MONGODB] Erro desconhecido: ${errorString.substring(0, 200)}`;
+}
+
+/**
+ * Conecta ao MongoDB com retry automático
+ */
+export async function connectMongo(retries = 3, delayMs = 5000): Promise<Db> {
+  // Se já conectado, retorna
+  if (db && client) {
+    try {
+      // Testa se conexão está ativa
+      await client.db('admin').admin().ping();
+      return db;
+    } catch (error) {
+      logger.warn('Conexão MongoDB inativa, reconectando...');
+      db = null;
+      client = null;
+    }
+  }
+
+  // Previne múltiplas tentativas simultâneas
+  if (isConnecting) {
+    logger.info('Aguardando conexão em andamento...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (db) return db;
+  }
+
+  isConnecting = true;
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      logger.info(`🔄 Tentativa ${attempt}/${retries} - Conectando ao MongoDB...`);
+      
+      client = new MongoClient(MONGODB_CONFIG.uri, MONGODB_CONFIG.options);
+      await client.connect();
+      
+      // Testa conexão
+      await client.db('admin').admin().ping();
+      
+      db = client.db(MONGODB_CONFIG.database);
+
+      // Criar índice único em messageId para prevenir duplicatas
+      await db.collection('video_suggestions').createIndex(
+        { messageId: 1 },
+        { unique: true }
+      );
+
+      logger.success(`✅ Conectado ao MongoDB: ${MONGODB_CONFIG.database} (tentativa ${attempt})`);
+      isConnecting = false;
+      return db;
+      
+    } catch (error: any) {
+      lastError = error;
+      const errorMsg = getMongoErrorMessage(error);
+      logger.error(`❌ Tentativa ${attempt}/${retries} falhou:`, errorMsg);
+      
+      // Limpa cliente em caso de erro
+      if (client) {
+        try {
+          await client.close();
+        } catch (closeError) {
+          // Ignora erro ao fechar
+        }
+      }
+      client = null;
+      db = null;
+
+      // Se não for a última tentativa, aguarda antes de tentar novamente
+      if (attempt < retries) {
+        logger.info(`⏳ Aguardando ${delayMs / 1000}s antes da próxima tentativa...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  isConnecting = false;
+  const finalError = new Error(getMongoErrorMessage(lastError));
+  logger.error('❌ Todas as tentativas de conexão falharam');
+  throw finalError;
 }
 
 export async function saveVideoSuggestion(data: Omit<VideoSuggestion, '_id' | 'publishedToQueue' | 'iaProcess' | 'createdAt'>): Promise<VideoSuggestion> {
@@ -66,14 +152,25 @@ export async function saveVideoSuggestion(data: Omit<VideoSuggestion, '_id' | 'p
     // Se for erro de duplicata (messageId único), retornar documento existente
     if (error.code === 11000) {
       logger.warn(`Mensagem duplicada detectada: ${data.messageId}`);
-      const db = await connectMongo();
-      const existing = await db.collection<VideoSuggestion>('video_suggestions').findOne({ messageId: data.messageId });
-      if (existing) {
-        return existing;
+      try {
+        const db = await connectMongo();
+        const existing = await db.collection<VideoSuggestion>('video_suggestions').findOne({ messageId: data.messageId });
+        if (existing) {
+          return existing;
+        }
+      } catch (findError) {
+        logger.error('Erro ao buscar documento duplicado:', getMongoErrorMessage(findError));
       }
     }
-    logger.error('Erro ao salvar no MongoDB:', error);
-    throw error;
+    
+    // Erro de conexão/SSL
+    const errorMsg = getMongoErrorMessage(error);
+    logger.error('❌ Erro ao salvar no MongoDB:', errorMsg);
+    
+    // Lança erro com mensagem amigável
+    const friendlyError = new Error(errorMsg);
+    friendlyError.name = 'MongoDBError';
+    throw friendlyError;
   }
 }
 
