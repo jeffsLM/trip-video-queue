@@ -190,7 +190,8 @@ export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): 
             await publishVideoSuggestion({
               url: savedDoc.url,
               texto: savedDoc.texto,
-              sugeridoPor: savedDoc.sugeridoPor
+              sugeridoPor: savedDoc.sugeridoPor,
+              messageId: savedDoc.messageId // ✅ Incluir messageId para rastreamento
             });
             logger.success(`✅ Publicado na fila video-suggestions`);
           } catch (rabbitError: any) {

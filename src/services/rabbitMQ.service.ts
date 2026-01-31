@@ -135,6 +135,7 @@ export async function publishVideoSuggestion(payload: {
   url: string;
   texto: string;
   sugeridoPor: string;
+  messageId?: string; // Adicionar messageId para rastreamento
 }): Promise<void> {
   try {
     const { channel } = await getLazyConnection();
