@@ -143,12 +143,21 @@ export async function handleMessagesUpsert({ messages, sock }: MessagesUpsert): 
         logger.info(`🔗 URL extraída: ${url}`);
 
         try {
+          // ✅ Garantir que messageId sempre existe
+          const messageId = msg.key.id && msg.key.id.trim() !== '' 
+            ? msg.key.id 
+            : `whatsapp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+          if (!msg.key.id || msg.key.id.trim() === '') {
+            logger.warn(`⚠️ Mensagem sem key.id, gerando messageId: ${messageId}`);
+          }
+
           // PASSO 1: Salvar no MongoDB (fonte da verdade - confiabilidade garantida)
           const videoData = {
             url: url,
             texto: text,
             sugeridoPor: pushName,
-            messageId: msg.key.id || '',
+            messageId: messageId,
             chatId: remoteJid || '',
             timestamp: Date.now(),
             status: 'pending' as const

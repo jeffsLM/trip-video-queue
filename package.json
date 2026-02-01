@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx --watch src/index.ts --ignore-watch \"data/.*\" \"auth/.*\" \"images/.*\""
+    "dev": "tsx --watch src/index.ts --ignore-watch \"data/.*\" \"auth/.*\" \"images/.*\"",
+    "replay": "tsx src/scripts/replay-queue.ts",
+    "replay-simple": "tsx src/scripts/replay-simple.ts",
+    "purge-queue": "tsx src/scripts/purge-queue.ts"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

@@ -135,9 +135,14 @@ export async function publishVideoSuggestion(payload: {
   url: string;
   texto: string;
   sugeridoPor: string;
-  messageId?: string; // Adicionar messageId para rastreamento
+  messageId: string; // ✅ OBRIGATÓRIO para rastreamento
 }): Promise<void> {
   try {
+    // ✅ Validação: messageId é obrigatório
+    if (!payload.messageId || payload.messageId.trim() === '') {
+      throw new Error('🔴 [RABBITMQ] messageId é obrigatório para publicar na fila');
+    }
+
     const { channel } = await getLazyConnection();
     const messageJson = JSON.stringify(payload);
     const messageBuffer = Buffer.from(messageJson);
@@ -152,7 +157,7 @@ export async function publishVideoSuggestion(payload: {
       throw new Error('🔴 [RABBITMQ] Fila cheia ou canal bloqueado - falha ao enviar mensagem');
     }
 
-    logger.info(`📤 Vídeo publicado na fila video-suggestions: ${payload.url.substring(0, 50)}...`);
+    logger.info(`📤 Vídeo publicado na fila video-suggestions [${payload.messageId}]: ${payload.url.substring(0, 50)}...`);
 
   } catch (error: any) {
     const errorMsg = getRabbitMQErrorMessage(error);
@@ -207,4 +212,5 @@ export async function closeConnection(): Promise<void> {
       cachedConnection = null; // Reset mesmo com erro
     }
   }
+  // Não faz nada se não há conexão (silencioso)
 }
