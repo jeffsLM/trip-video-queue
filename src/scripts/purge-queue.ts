@@ -1,8 +1,8 @@
 /**
  * Script para LIMPAR TOTALMENTE a fila do RabbitMQ
- * 
+ *
  * ATENÇÃO: Este script remove TODAS as mensagens da fila!
- * 
+ *
  * Uso: npm run purge-queue
  */
 
@@ -38,12 +38,12 @@ function question(prompt: string): Promise<string> {
 async function getConnection() {
   const connection = await amqp.connect(RABBITMQ_CONFIG.url);
   const channel = await connection.createChannel();
-  
+
   // Garante que a fila existe
   await channel.assertQueue(RABBITMQ_CONFIG.queues.VIDEO_SUGGESTIONS, {
     durable: true
   });
-  
+
   return { connection, channel };
 }
 
@@ -61,7 +61,7 @@ async function main() {
 
     // Verifica status da fila
     logger.info('📊 Verificando status da fila...\n');
-    
+
     const queueInfo = await getQueueStatus();
     const messageCount = queueInfo.videoSuggestions.messageCount;
     const consumerCount = queueInfo.videoSuggestions.consumerCount;
@@ -88,7 +88,7 @@ async function main() {
 
     // Confirmação 1
     const confirm1 = await question('Digite "LIMPAR" para continuar ou "N" para cancelar: ');
-    
+
     if (confirm1.toUpperCase() !== 'LIMPAR') {
       console.log('\n❌ Operação cancelada pelo usuário.\n');
       rl.close();
@@ -98,7 +98,7 @@ async function main() {
     // Confirmação 2 (dupla confirmação para segurança)
     console.log('\n⚠️  ÚLTIMA CONFIRMAÇÃO!\n');
     const confirm2 = await question(`Tem certeza que deseja remover ${messageCount} mensagem(ns)? (SIM/NAO): `);
-    
+
     if (confirm2.toUpperCase() !== 'SIM') {
       console.log('\n❌ Operação cancelada pelo usuário.\n');
       rl.close();
@@ -107,13 +107,13 @@ async function main() {
 
     // Limpa a fila
     console.log('\n🗑️  Limpando fila...\n');
-    
+
     const { connection: conn, channel: ch } = await getConnection();
-    connection = conn;
+    connection = conn as any;
     channel = ch;
 
     const purgeResult = await channel.purgeQueue(RABBITMQ_CONFIG.queues.VIDEO_SUGGESTIONS);
-    
+
     console.log('='.repeat(60));
     console.log('✅ FILA LIMPA COM SUCESSO!');
     console.log('='.repeat(60));
@@ -132,15 +132,15 @@ async function main() {
     console.log('  • Problemas de rede\n');
   } finally {
     rl.close();
-    
+
     // Fecha conexões
     try {
       if (channel) await channel.close();
-      if (connection) await connection.close();
+      if (connection) await (connection as any).connection?.close();
     } catch (error) {
       // Ignora erros ao fechar
     }
-    
+
     await closeConnection();
     process.exit(0);
   }
